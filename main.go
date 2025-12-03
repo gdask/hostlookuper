@@ -131,7 +131,7 @@ func main() {
 
 	var hosts hosts = strings.Split(*hostsVal, ",")
 	if err := hosts.isValid(); err != nil {
-		l.Fatalw("parsing hosts failed",
+		l.Warnw("parsing hosts failed in global dns",
 			"val", hostsVal,
 			"err", err,
 		)
