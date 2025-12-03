@@ -1,3 +1,10 @@
+# Hostlookuper Fork
+
+This project is modified, to cater cloud-internal zone testing in mutliple clusters.
+
+### Local Build & Deploy to kind
+make push
+
 # Hostlookuper
 
 Hostlookuper periodically performs DNS requests, measures latency and exports
