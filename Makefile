@@ -3,7 +3,7 @@ DOCKERFILE=packaging/local-build/Dockerfile
 
 # Hardcoded list of kind clusters that should receive the image
 #CLUSTERS = cluster-a cluster-b cluster-c
-CLUSTERS = prometheus
+CLUSTERS = prometheus zurich berne
 
 .PHONY: build kind-load push
 
