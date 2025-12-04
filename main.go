@@ -307,7 +307,11 @@ func (l *lookuper) start(interval time.Duration) {
 		}
 
 		if watchCluster {
+			classification := "tp" // Default to True Positive
+			// Get cluster IP for this host
+			clusterIP := GetDNSEntryOrEmpty(l.host)
 			if msg.Rcode == dns.RcodeSuccess {
+				// Retrieve IP from DNS answer
 				var ips []string
 				for _, ans := range msg.Answer {
 					if a, ok := ans.(*dns.A); ok {
@@ -315,29 +319,38 @@ func (l *lookuper) start(interval time.Duration) {
 					}
 				}
 				ipResult := ips[0]
-				// check if this IP is in the cluster endpoints
-				clusterIP := GetDNSEntryOrEmpty(l.host)
+
 				if clusterIP == "" {
 					// endpoint got removed in cluster but not yet in dns chain -- False Positive --
+					classification = "fp"
 					l.l.Warnw("dns lookup returned an IP for a host not in cluster endpoints",
 						"host", l.host,
 						"returned_ip", ipResult,
-						//"content of cluster endpoints", GetDNSEndpointsSnapshot(),
 					)
 				} else if ipResult != clusterIP {
 					// IP changed in cluster but not yet in dns chain -- Innaccurate Result --
+					classification = "fp"
 					l.l.Warnw("dns lookup returned an IP not matching cluster endpoint",
 						"host", l.host,
 						"expected_ip", clusterIP,
 						"returned_ip", ipResult,
 					)
-				} else {
-					//l.l.Infow("nothing to see here") // True Positive
+				} // Else -- True Positive
+			} else { // Rcode not success, NXDOMAIN or others
+				classification = "tn"
+				if clusterIP != "" {
+					// endpoint still present in cluster but dns says NXDOMAIN -- False Negative --
+					classification = "fn"
+					l.l.Warnw("dns lookup returned non-success Rcode for a host present in cluster endpoints",
+						"host", l.host,
+						"expected_ip", clusterIP,
+						"returned_rcode", rcodeStr,
+					)
 				}
 			}
 
-			metrics.GetOrCreateCounter(fmt.Sprintf("%s{%s,rcode=%q,source=%q}",
-				dnsLookupTotalName, l.labels, rcodeStr, "cluster")).Inc()
+			metrics.GetOrCreateCounter(fmt.Sprintf("%s{%s,rcode=%q,classification=%q}",
+				dnsLookupTotalName, l.labels, rcodeStr, classification)).Inc()
 		} else {
 			metrics.GetOrCreateCounter(fmt.Sprintf("%s{%s,rcode=%q}",
 				dnsLookupTotalName, l.labels, rcodeStr)).Inc()
