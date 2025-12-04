@@ -2,8 +2,8 @@
 package main
 
 import (
-	"context"
 	"bufio"
+	"context"
 	"flag"
 	"fmt"
 	"math/rand"
@@ -141,6 +141,8 @@ func parseHosts(l *zap.SugaredLogger, hostsVal, domainProbes string) (hosts, err
 	return hosts(strings.Split(hostsVal, ",")), nil
 }
 
+var watchCluster bool
+
 func main() {
 	fs := flag.NewFlagSet("hostlookuper", flag.ExitOnError)
 
@@ -172,6 +174,21 @@ func main() {
 		l.Fatalw("could not parse hosts",
 			"err", err,
 		)
+	}
+
+	// If domain probes file is used, enable cluster watching
+	watchCluster = false
+	if *domainProbes != "" {
+		watchCluster = true
+	}
+	if watchCluster {
+		endpointStoreInit()
+		err := StartDNSEndpointWatcher(context.Background())
+		if err != nil {
+			l.Fatalw("could not start DNS endpoint watcher",
+				"err", err,
+			)
+		}
 	}
 
 	if err := hosts.isValid(); err != nil {
@@ -289,8 +306,43 @@ func (l *lookuper) start(interval time.Duration) {
 			rcodeStr = fmt.Sprintf("%#x", msg.Rcode)
 		}
 
-		metrics.GetOrCreateCounter(fmt.Sprintf("%s{%s,rcode=%q}",
-			dnsLookupTotalName, l.labels, rcodeStr)).Inc()
+		if watchCluster {
+			if msg.Rcode == dns.RcodeSuccess {
+				var ips []string
+				for _, ans := range msg.Answer {
+					if a, ok := ans.(*dns.A); ok {
+						ips = append(ips, a.A.String())
+					}
+				}
+				ipResult := ips[0]
+				// check if this IP is in the cluster endpoints
+				clusterIP := GetDNSEntryOrEmpty(l.host)
+				if clusterIP == "" {
+					// endpoint got removed in cluster but not yet in dns chain -- False Positive --
+					l.l.Warnw("dns lookup returned an IP for a host not in cluster endpoints",
+						"host", l.host,
+						"returned_ip", ipResult,
+						//"content of cluster endpoints", GetDNSEndpointsSnapshot(),
+					)
+				} else if ipResult != clusterIP {
+					// IP changed in cluster but not yet in dns chain -- Innaccurate Result --
+					l.l.Warnw("dns lookup returned an IP not matching cluster endpoint",
+						"host", l.host,
+						"expected_ip", clusterIP,
+						"returned_ip", ipResult,
+					)
+				} else {
+					//l.l.Infow("nothing to see here") // True Positive
+				}
+			}
+
+			metrics.GetOrCreateCounter(fmt.Sprintf("%s{%s,rcode=%q,source=%q}",
+				dnsLookupTotalName, l.labels, rcodeStr, "cluster")).Inc()
+		} else {
+			metrics.GetOrCreateCounter(fmt.Sprintf("%s{%s,rcode=%q}",
+				dnsLookupTotalName, l.labels, rcodeStr)).Inc()
+		}
+
 		histogramGetter(fmt.Sprintf("%s{%s}",
 			dnsDurationName, l.labels)).Update(rtt.Seconds())
 
