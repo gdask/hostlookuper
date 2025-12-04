@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"bufio"
 	"flag"
 	"fmt"
 	"math/rand"
@@ -105,6 +106,41 @@ func parseDNSServers(l *zap.SugaredLogger, dnsServersStr string) []DNSServer {
 	return dnsServers
 }
 
+// parseHosts returns a hosts slice read either from a file (if hostsFile is
+// non-empty) or from the comma-separated hostsVal. It trims whitespace,
+// ignores blank lines and lines starting with '#'. On file errors or when
+// the file contains no hosts, an error is returned.
+func parseHosts(l *zap.SugaredLogger, hostsVal, domainProbes string) (hosts, error) {
+	if domainProbes != "" {
+		f, err := os.Open(domainProbes)
+		if err != nil {
+			return nil, fmt.Errorf("could not open domain probes file %s: %w", domainProbes, err)
+		}
+		defer f.Close()
+
+		scanner := bufio.NewScanner(f)
+		var hs []string
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			hs = append(hs, line)
+		}
+		if err := scanner.Err(); err != nil {
+			return nil, fmt.Errorf("error reading domain probes file %s: %w", domainProbes, err)
+		}
+		if len(hs) == 0 {
+			return nil, fmt.Errorf("domain probes file contains no hosts: %s", domainProbes)
+		}
+
+		return hosts(hs), nil
+	}
+
+	// fall back to comma-separated flag value
+	return hosts(strings.Split(hostsVal, ",")), nil
+}
+
 func main() {
 	fs := flag.NewFlagSet("hostlookuper", flag.ExitOnError)
 
@@ -115,6 +151,7 @@ func main() {
 		timeout             = fs.Duration("timeout", 5*time.Second, "maximum timeout for a DNS query. must be in Go time.ParseDuration format, e.g. 5s or 5m or 1h, etc")
 		listen              = fs.String("listen", ":9090", "address on which hostlookuper listens. e.g. 0.0.0.0:9090")
 		hostsVal            = fs.String("hosts", "google.ch,ch.ch", "comma-separated list of hosts against which to perform DNS lookups")
+		domainProbes        = fs.String("domain-probes", "", "path to a file containing a list of domains to probe (one per line). if set, this overrides the 'hosts' flag")
 		dnsServersVal       = fs.String("dns-servers", "udp://9.9.9.9:53,udp://8.8.8.8:53,udp://one.one.one.one:53", "comma-separated list of DNS servers. if the protocol is omitted, udp is implied, and if the port is omitted, 53 is implied")
 	)
 
@@ -129,10 +166,19 @@ func main() {
 	logger.SetDebug(*debug)
 	l := logger.Get()
 
-	var hosts hosts = strings.Split(*hostsVal, ",")
+	// Parse hosts from flag or file (delegated to helper)
+	hosts, err := parseHosts(l, *hostsVal, *domainProbes)
+	if err != nil {
+		l.Fatalw("could not parse hosts",
+			"err", err,
+		)
+	}
+
 	if err := hosts.isValid(); err != nil {
 		l.Warnw("parsing hosts failed in global dns",
-			"val", hostsVal,
+			"hosts", hosts,
+			"domain_probes_file", *domainProbes,
+			"hosts_flag", *hostsVal,
 			"err", err,
 		)
 	}
