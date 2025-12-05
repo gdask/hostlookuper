@@ -213,7 +213,7 @@ func (r *DNSRotator) updateClusterCRD(domain, newIP string) error {
 		return err
 	}
 
-	_, err = r.dyn.Resource(r.gvr).Patch(
+	_, err = r.dyn.Resource(r.gvr).Namespace("default").Patch(
 		context.Background(),
 		domain,
 		types.MergePatchType,
