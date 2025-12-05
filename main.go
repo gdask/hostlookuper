@@ -188,7 +188,18 @@ func main() {
 			l.Fatalw("could not start DNS endpoint watcher",
 				"err", err,
 			)
+			panic(err)
 		}
+		// Example: rotate every 10 seconds using subnet
+		rotator, err := NewDNSRotator("10.1.1.0/24", 10*time.Second)
+		if err != nil {
+			l.Fatalw("could not start DNS endpoint watcher",
+				"err", err,
+			)
+			panic(err)
+		}
+		rotator.Start()
+		defer rotator.Stop()
 	}
 
 	if err := hosts.isValid(); err != nil {

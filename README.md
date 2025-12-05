@@ -1,6 +1,8 @@
 # Hostlookuper Fork
 
 This project is modified, to cater cloud-internal zone testing in mutliple clusters.
+Introduces an endpoint-watcher element, which checks for Endpoint CRs in the cluster and compared the dns response with the cluster state.
+Also introduces a dns-rotation element, which updates an IP record every few seconds.
 
 ### Local Build & Deploy to kind
 make push
