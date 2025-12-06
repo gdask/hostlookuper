@@ -13,7 +13,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/VictoriaMetrics/metrics"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
 	"github.com/miekg/dns"
 	"github.com/peterbourgon/ff/v3"
 	"github.com/postfinance/flash"
@@ -24,6 +27,33 @@ const (
 	dnsDurationName    = "hostlookuper_dns_lookup_duration_seconds"
 	dnsLookupTotalName = "hostlookuper_dns_lookup_total"
 	dnsErrorsTotalName = "hostlookuper_dns_errors_total"
+)
+
+var (
+	dnsLookupDuration = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "hostlookuper_dns_lookup_duration_seconds",
+			Help:    "DNS lookup latency",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"host", "dns_server", "rcode", "classification"},
+	)
+
+	dnsLookupTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "hostlookuper_dns_lookups_total",
+			Help: "Total DNS lookups performed",
+		},
+		[]string{"host", "dns_server", "rcode", "classification"},
+	)
+
+	dnsErrorsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "hostlookuper_dns_errors_total",
+			Help: "Total DNS lookup errors",
+		},
+		[]string{"host", "dns_server", "reason"},
+	)
 )
 
 //nolint:gochecknoglobals // There is no other way than doing so. Values will be set on build.
@@ -38,13 +68,6 @@ type DNSServer struct {
 	address string
 	name    string
 }
-
-type Histogram interface {
-	Update(v float64)
-	UpdateDuration(start time.Time)
-}
-
-var histogramGetter func(string) Histogram
 
 func (srv DNSServer) String() string {
 	return fmt.Sprintf("%s://%s", srv.network, srv.name)
@@ -147,14 +170,13 @@ func main() {
 	fs := flag.NewFlagSet("hostlookuper", flag.ExitOnError)
 
 	var (
-		debug               = fs.Bool("debug", false, "enable verbose logging")
-		prometheusHistogram = fs.Bool("prom-histogram", false, "use Prometheus-compatible (le) histograms (default is false)")
-		interval            = fs.Duration("interval", 5*time.Second, "interval between DNS checks. must be in Go time.ParseDuration format, e.g. 5s or 5m or 1h, etc")
-		timeout             = fs.Duration("timeout", 5*time.Second, "maximum timeout for a DNS query. must be in Go time.ParseDuration format, e.g. 5s or 5m or 1h, etc")
-		listen              = fs.String("listen", ":9090", "address on which hostlookuper listens. e.g. 0.0.0.0:9090")
-		hostsVal            = fs.String("hosts", "google.ch,ch.ch", "comma-separated list of hosts against which to perform DNS lookups")
-		domainProbes        = fs.String("domain-probes", "", "path to a file containing a list of domains to probe (one per line). if set, this overrides the 'hosts' flag")
-		dnsServersVal       = fs.String("dns-servers", "udp://9.9.9.9:53,udp://8.8.8.8:53,udp://one.one.one.one:53", "comma-separated list of DNS servers. if the protocol is omitted, udp is implied, and if the port is omitted, 53 is implied")
+		debug         = fs.Bool("debug", false, "enable verbose logging")
+		interval      = fs.Duration("interval", 5*time.Second, "interval between DNS checks. must be in Go time.ParseDuration format, e.g. 5s or 5m or 1h, etc")
+		timeout       = fs.Duration("timeout", 5*time.Second, "maximum timeout for a DNS query. must be in Go time.ParseDuration format, e.g. 5s or 5m or 1h, etc")
+		listen        = fs.String("listen", ":9090", "address on which hostlookuper listens. e.g. 0.0.0.0:9090")
+		hostsVal      = fs.String("hosts", "google.ch,ch.ch", "comma-separated list of hosts against which to perform DNS lookups")
+		domainProbes  = fs.String("domain-probes", "", "path to a file containing a list of domains to probe (one per line). if set, this overrides the 'hosts' flag")
+		dnsServersVal = fs.String("dns-servers", "udp://9.9.9.9:53,udp://8.8.8.8:53,udp://one.one.one.one:53", "comma-separated list of DNS servers. if the protocol is omitted, udp is implied, and if the port is omitted, 53 is implied")
 	)
 
 	err := ff.Parse(fs, os.Args[1:], ff.WithEnvVarPrefix("HOSTLOOKUPER"))
@@ -211,14 +233,6 @@ func main() {
 		)
 	}
 
-	histogramGetter = func(name string) Histogram {
-		if *prometheusHistogram {
-			return metrics.GetOrCreatePrometheusHistogram(name)
-		} else {
-			return metrics.GetOrCreateHistogram(name)
-		}
-	}
-
 	dnsServers := parseDNSServers(l, *dnsServersVal)
 
 	for _, host := range hosts {
@@ -231,9 +245,8 @@ func main() {
 		}
 	}
 
-	http.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
-		metrics.WritePrometheus(w, false)
-	})
+	// Expose metrics endpoint
+	http.Handle("/metrics", promhttp.Handler())
 
 	l.Infow("starting server",
 		"listen", listen,
@@ -286,7 +299,7 @@ func (l *lookuper) start(interval time.Duration) {
 		"jitter", jitter,
 	)
 
-	metrics.GetOrCreateCounter(fmt.Sprintf("%s{%s}", dnsErrorsTotalName, l.labels)).Set(0)
+	//metrics.GetOrCreateCounter(fmt.Sprintf("%s{%s}", dnsErrorsTotalName, l.labels)).Set(0)
 	time.Sleep(jitter)
 
 	ticker := time.NewTicker(interval)
@@ -299,15 +312,13 @@ func (l *lookuper) start(interval time.Duration) {
 		m.SetQuestion(fmt.Sprintf("%s.", l.host), dns.TypeA)
 		msg, rtt, err := l.c.Exchange(m, l.dnsServer.address)
 		if err != nil {
-			metrics.GetOrCreateCounter(fmt.Sprintf("%s{%s}", dnsLookupTotalName, l.labels)).Inc()
-			metrics.GetOrCreateCounter(fmt.Sprintf("%s{%s}", dnsErrorsTotalName, l.labels)).Inc()
-
+			dnsLookupTotal.WithLabelValues(l.host, l.dnsServer.name, "n/a-error").Inc()
+			dnsErrorsTotal.WithLabelValues(l.host, l.dnsServer.name, err.Error()).Inc()
 			l.l.Errorw("dns lookup failed",
 				"host", l.host,
 				"time", rtt,
 				"err", err,
 			)
-
 			continue
 		}
 
@@ -316,9 +327,8 @@ func (l *lookuper) start(interval time.Duration) {
 		if !ok { // if rcode not known in table.
 			rcodeStr = fmt.Sprintf("%#x", msg.Rcode)
 		}
-
+		classification := "na"
 		if watchCluster {
-			classification := "tp" // Default to True Positive
 			// Get cluster IP for this host
 			clusterIP := GetDNSEntryOrEmpty(l.host)
 			if msg.Rcode == dns.RcodeSuccess {
@@ -346,7 +356,9 @@ func (l *lookuper) start(interval time.Duration) {
 						"expected_ip", clusterIP,
 						"returned_ip", ipResult,
 					)
-				} // Else -- True Positive
+				} else { // Else, correct classification -- True Positive
+					classification = "tp"
+				}
 			} else { // Rcode not success, NXDOMAIN or others
 				classification = "tn"
 				if clusterIP != "" {
@@ -360,15 +372,9 @@ func (l *lookuper) start(interval time.Duration) {
 				}
 			}
 
-			metrics.GetOrCreateCounter(fmt.Sprintf("%s{%s,rcode=%q,classification=%q}",
-				dnsLookupTotalName, l.labels, rcodeStr, classification)).Inc()
-		} else {
-			metrics.GetOrCreateCounter(fmt.Sprintf("%s{%s,rcode=%q}",
-				dnsLookupTotalName, l.labels, rcodeStr)).Inc()
 		}
-
-		histogramGetter(fmt.Sprintf("%s{%s}",
-			dnsDurationName, l.labels)).Update(rtt.Seconds())
+		dnsLookupTotal.WithLabelValues(l.host, l.dnsServer.name, rcodeStr, classification).Inc()
+		dnsLookupDuration.WithLabelValues(l.host, l.dnsServer.name, rcodeStr, classification).Observe(rtt.Seconds())
 
 		l.l.Debugw("lookup result",
 			"time", rtt,
